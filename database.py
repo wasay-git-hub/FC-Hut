@@ -79,16 +79,16 @@ def seed_products(force: bool = False):
             cursor.execute("DELETE FROM sqlite_sequence WHERE name = 'products'")
             
         initial_items = [
-            ("Crispy Chicken Nuggets (1kg)", "Nuggets", "1kg pack", 1450, random.randint(10, 25)),
-            ("Tempura Nuggets (500g)", "Nuggets", "500g pack", 850, random.randint(6, 18)),
-            ("Crispy Chicken Tenders (500g)", "Tenders", "500g pack", 950, random.randint(8, 20)),
-            ("Spicy Buffalo Wings (750g)", "Wings", "750g pack", 1150, random.randint(5, 16)),
-            ("Chicken Cheese Balls (400g - 12 pcs)", "Snacks", "12 pcs (400g)", 890, random.randint(5, 15)),
-            ("Zinger Burger Fillets (4 pcs)", "Patties", "4 fillets", 980, random.randint(10, 22)),
-            ("Crispy Popcorn Chicken (500g)", "Snacks", "500g pack", 920, random.randint(8, 20)),
-            ("Chicken Chapli Kabab (6 pcs)", "Kababs", "6 kababs", 780, random.randint(6, 16)),
-            ("Chicken Seekh Kabab (6 pcs)", "Kababs", "6 seekh", 820, random.randint(5, 15)),
-            ("Crispy Chicken Samosas (12 pcs)", "Snacks", "12 samosas", 650, random.randint(10, 30)),
+            ("Crispy Chicken Nuggets", "Nuggets", "1 packet consists of 24 pieces", 1450, random.randint(10, 25)),
+            ("Tempura Nuggets", "Nuggets", "1 packet consists of 12 pieces", 850, random.randint(6, 18)),
+            ("Crispy Chicken Tenders", "Tenders", "1 packet consists of 10 tenders", 950, random.randint(8, 20)),
+            ("Spicy Buffalo Wings", "Wings", "1 packet consists of 12 wings", 1150, random.randint(5, 16)),
+            ("Chicken Cheese Balls", "Snacks", "1 packet consists of 12 cheese balls", 890, random.randint(5, 15)),
+            ("Zinger Burger Fillets", "Patties", "1 packet consists of 4 fillets", 980, random.randint(10, 22)),
+            ("Crispy Popcorn Chicken", "Snacks", "1 packet consists of 40 pieces", 920, random.randint(8, 20)),
+            ("Chicken Chapli Kabab", "Kababs", "1 packet consists of 6 kababs", 780, random.randint(6, 16)),
+            ("Chicken Seekh Kabab", "Kababs", "1 packet consists of 8 pieces", 850, random.randint(5, 15)),
+            ("Crispy Chicken Samosas", "Snacks", "1 packet consists of 12 samosas", 650, random.randint(10, 30)),
         ]
         
         cursor.executemany("""
@@ -97,11 +97,14 @@ def seed_products(force: bool = False):
         """, initial_items)
         conn.commit()
 
-def get_menu() -> List[Dict[str, Any]]:
-    """Returns all products with their current stock status and PKR pricing."""
+def get_menu(only_in_stock: bool = False) -> List[Dict[str, Any]]:
+    """Returns products with their current stock status and PKR pricing (can filter to in-stock only)."""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT id, name, category, pack_size, price_pkr, stock_qty FROM products ORDER BY category, name")
+        if only_in_stock:
+            cursor.execute("SELECT id, name, category, pack_size, price_pkr, stock_qty FROM products WHERE stock_qty > 0 ORDER BY category, name")
+        else:
+            cursor.execute("SELECT id, name, category, pack_size, price_pkr, stock_qty FROM products ORDER BY category, name")
         rows = cursor.fetchall()
         return [dict(row) for row in rows]
 
@@ -291,8 +294,8 @@ def get_product_by_id(product_id: int) -> Optional[Dict[str, Any]]:
 # Product aliases for typo and Roman Urdu tolerance
 PRODUCT_KEYWORD_MAP = [
     ("%Samosa%", ["samosa", "samosay", "samose", "samosiyan", "samosi", "somosa"]),
-    ("%Crispy Chicken Nuggets (1kg)%", ["crispy nugget", "1kg nugget", "nagats", "nagat", "nugets", "1kg nuggets"]),
-    ("%Tempura Nuggets%", ["tempura", "tempura nugget", "tempura nuggets", "500g nugget"]),
+    ("%Crispy Chicken Nuggets%", ["crispy nugget", "nugget", "nuggets", "nagats", "nagat", "nugets"]),
+    ("%Tempura Nuggets%", ["tempura", "tempura nugget", "tempura nuggets"]),
     ("%Tenders%", ["tender", "tenders", "crispy tender", "tandar", "tandars"]),
     ("%Wings%", ["wing", "wings", "buffalo", "buffalo wing", "buffalo wings", "spicy wing"]),
     ("%Cheese Balls%", ["cheese ball", "cheese balls", "ball", "balls"]),
