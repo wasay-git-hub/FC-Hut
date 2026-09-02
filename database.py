@@ -1,0 +1,277 @@
+import sqlite3
+import json
+import random
+from typing import List, Dict, Any, Optional
+from pathlib import Path
+
+DB_PATH = Path(__file__).parent / "fchut.db"
+
+def get_db():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+def init_db():
+    """Initializes the database tables."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        
+        # Products table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS products (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                category TEXT NOT NULL,
+                pack_size TEXT NOT NULL,
+                price_pkr INTEGER NOT NULL,
+                stock_qty INTEGER NOT NULL DEFAULT 0
+            )
+        """)
+        
+        # Orders table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS orders (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                customer_phone TEXT NOT NULL,
+                customer_name TEXT,
+                delivery_address TEXT NOT NULL,
+                items_json TEXT NOT NULL,
+                total_pkr INTEGER NOT NULL,
+                status TEXT DEFAULT 'CONFIRMED',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
+        # Chat history table for conversation continuity
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS chat_history (
+                customer_phone TEXT PRIMARY KEY,
+                history_json TEXT NOT NULL,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        conn.commit()
+
+def seed_products(force: bool = False):
+    """Pre-seeds the inventory with realistic frozen chicken items and random stock quantities."""
+    init_db()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM products")
+        count = cursor.fetchone()[0]
+        
+        if count > 0 and not force:
+            return  # Already seeded
+
+        # Clear existing if force is True
+        if force:
+            cursor.execute("DELETE FROM products")
+            
+        initial_items = [
+            ("Crispy Chicken Nuggets (1kg)", "Nuggets", "1kg pack", 1450, random.randint(10, 25)),
+            ("Tempura Nuggets (500g)", "Nuggets", "500g pack", 850, random.randint(6, 18)),
+            ("Crispy Chicken Tenders (500g)", "Tenders", "500g pack", 950, random.randint(8, 20)),
+            ("Spicy Buffalo Wings (750g)", "Wings", "750g pack", 1150, random.randint(5, 16)),
+            ("Chicken Cheese Balls (400g - 12 pcs)", "Snacks", "12 pcs (400g)", 890, random.randint(5, 15)),
+            ("Zinger Burger Fillets (4 pcs)", "Patties", "4 fillets", 980, random.randint(10, 22)),
+            ("Crispy Popcorn Chicken (500g)", "Snacks", "500g pack", 920, random.randint(8, 20)),
+            ("Chicken Chapli Kabab (6 pcs)", "Kababs", "6 kababs", 780, random.randint(6, 16)),
+            ("Chicken Seekh Kabab (6 pcs)", "Kababs", "6 seekh", 820, random.randint(5, 15)),
+            ("Crispy Chicken Samosas (12 pcs)", "Snacks", "12 samosas", 650, random.randint(10, 30)),
+        ]
+        
+        cursor.executemany("""
+            INSERT OR REPLACE INTO products (name, category, pack_size, price_pkr, stock_qty)
+            VALUES (?, ?, ?, ?, ?)
+        """, initial_items)
+        conn.commit()
+
+def get_menu() -> List[Dict[str, Any]]:
+    """Returns all products with their current stock status and PKR pricing."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, name, category, pack_size, price_pkr, stock_qty FROM products ORDER BY category, name")
+        rows = cursor.fetchall()
+        return [dict(row) for row in rows]
+
+def check_stock(query: str = "") -> List[Dict[str, Any]]:
+    """Checks stock for items matching a keyword (or returns all in-stock items if query is empty)."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        if query.strip():
+            wildcard = f"%{query.strip()}%"
+            cursor.execute("""
+                SELECT id, name, category, pack_size, price_pkr, stock_qty 
+                FROM products 
+                WHERE name LIKE ? OR category LIKE ?
+                ORDER BY stock_qty DESC
+            """, (wildcard, wildcard))
+        else:
+            cursor.execute("""
+                SELECT id, name, category, pack_size, price_pkr, stock_qty 
+                FROM products 
+                WHERE stock_qty > 0
+                ORDER BY category, name
+            """)
+        rows = cursor.fetchall()
+        return [dict(row) for row in rows]
+
+def place_order_atomic(
+    customer_phone: str,
+    customer_name: Optional[str],
+    delivery_address: str,
+    items: List[Dict[str, Any]]
+) -> Dict[str, Any]:
+    """
+    Atomically places an order and deducts stock from inventory.
+    Each item in `items` should be: {"product_id": int, "quantity": int} or {"name": str, "quantity": int}.
+    
+    If stock is insufficient for ANY item, transaction rolls back and returns an error dictionary.
+    """
+    if not items:
+        return {"success": False, "error": "Order must contain at least one item."}
+    
+    if not delivery_address or not delivery_address.strip():
+        return {"success": False, "error": "Delivery address is required to place an order."}
+
+    conn = get_db()
+    try:
+        cursor = conn.cursor()
+        
+        # 1. Resolve and validate stock for all items
+        resolved_items = []
+        total_pkr = 0
+        
+        for item in items:
+            qty = int(item.get("quantity", 1))
+            if qty <= 0:
+                return {"success": False, "error": "Quantity must be at least 1."}
+                
+            product_id = item.get("product_id")
+            name = item.get("name")
+            
+            if product_id:
+                cursor.execute("SELECT id, name, pack_size, price_pkr, stock_qty FROM products WHERE id = ?", (product_id,))
+            elif name:
+                cursor.execute("SELECT id, name, pack_size, price_pkr, stock_qty FROM products WHERE name LIKE ?", (f"%{name}%",))
+            else:
+                return {"success": False, "error": "Each item must have a product_id or name."}
+                
+            product = cursor.fetchone()
+            if not product:
+                return {"success": False, "error": f"Product '{name or product_id}' not found in catalog."}
+                
+            prod_id = product["id"]
+            prod_name = product["name"]
+            prod_price = product["price_pkr"]
+            current_stock = product["stock_qty"]
+            pack_size = product["pack_size"]
+            
+            if current_stock < qty:
+                return {
+                    "success": False,
+                    "error": f"Insufficient stock for '{prod_name}'. Requested: {qty}, Available: {current_stock}."
+                }
+                
+            line_total = prod_price * qty
+            total_pkr += line_total
+            resolved_items.append({
+                "product_id": prod_id,
+                "name": prod_name,
+                "pack_size": pack_size,
+                "price_pkr": prod_price,
+                "quantity": qty,
+                "subtotal_pkr": line_total
+            })
+
+        # 2. Deduct stock atomically
+        for item in resolved_items:
+            cursor.execute("""
+                UPDATE products 
+                SET stock_qty = stock_qty - ? 
+                WHERE id = ? AND stock_qty >= ?
+            """, (item["quantity"], item["product_id"], item["quantity"]))
+            
+            if cursor.rowcount == 0:
+                conn.rollback()
+                return {"success": False, "error": f"Stock conflict for '{item['name']}'. Please try again."}
+
+        # 3. Create order record
+        cursor.execute("""
+            INSERT INTO orders (customer_phone, customer_name, delivery_address, items_json, total_pkr, status)
+            VALUES (?, ?, ?, ?, ?, 'CONFIRMED')
+        """, (
+            customer_phone,
+            customer_name or "Valued Customer",
+            delivery_address.strip(),
+            json.dumps(resolved_items),
+            total_pkr
+        ))
+        order_id = cursor.lastrowid
+        conn.commit()
+
+        return {
+            "success": True,
+            "order_id": order_id,
+            "customer_phone": customer_phone,
+            "customer_name": customer_name or "Valued Customer",
+            "delivery_address": delivery_address.strip(),
+            "items": resolved_items,
+            "total_pkr": total_pkr,
+            "currency": "PKR",
+            "status": "CONFIRMED"
+        }
+
+    except Exception as e:
+        conn.rollback()
+        return {"success": False, "error": str(e)}
+    finally:
+        conn.close()
+
+def get_orders() -> List[Dict[str, Any]]:
+    """Returns all recorded orders."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM orders ORDER BY id DESC")
+        rows = cursor.fetchall()
+        orders = []
+        for r in rows:
+            order = dict(r)
+            order["items"] = json.loads(order["items_json"])
+            orders.append(order)
+        return orders
+
+def get_chat_history(customer_phone: str) -> List[Dict[str, str]]:
+    """Retrieves previous chat messages for this customer."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT history_json FROM chat_history WHERE customer_phone = ?", (customer_phone,))
+        row = cursor.fetchone()
+        if row:
+            try:
+                return json.loads(row["history_json"])
+            except Exception:
+                return []
+        return []
+
+def save_chat_history(customer_phone: str, history: List[Dict[str, str]]):
+    """Saves updated conversation history for a customer (keeps last 20 messages)."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        # Keep only the last 20 messages to avoid token blowup
+        trimmed = history[-20:]
+        cursor.execute("""
+            INSERT INTO chat_history (customer_phone, history_json, updated_at)
+            VALUES (?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(customer_phone) DO UPDATE SET 
+                history_json = excluded.history_json,
+                updated_at = CURRENT_TIMESTAMP
+        """, (customer_phone, json.dumps(trimmed)))
+        conn.commit()
+
+if __name__ == "__main__":
+    init_db()
+    seed_products(force=True)
+    print("Database initialized and seeded successfully!")
+    for item in get_menu():
+        print(f"[{item['id']}] {item['name']} | PKR {item['price_pkr']} | Stock: {item['stock_qty']} packs")
