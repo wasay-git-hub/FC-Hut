@@ -1,10 +1,17 @@
 import os
+import sys
 import requests
-from fastapi import FastAPI, Request, Response, Query, HTTPException
+from fastapi import FastAPI, Request, Query, HTTPException
 from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
 from dotenv import load_dotenv
+
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
 
 import database
 from agent import FCHutAgent
@@ -13,7 +20,7 @@ load_dotenv()
 
 app = FastAPI(
     title="FC-Hut WhatsApp AI Agent",
-    description="Automated AI Sales & Stock Management Agent for Frozen Chicken Items (PKR)"
+    description="Automated AI Sales & Stock Management Agent for Frozen Chicken Items (PKR) with Native Buttons & Lists"
 )
 
 # Initialize database on startup
@@ -32,6 +39,7 @@ def home():
         "business": "FC-Hut (Frozen Chicken Hut)",
         "status": "online",
         "currency": "PKR",
+        "interactive_features": ["Native WhatsApp List Menus", "Quick Reply Buttons", "Atomic Stock Deduction"],
         "endpoints": {
             "products": "/products",
             "orders": "/orders",
@@ -71,12 +79,12 @@ def verify_webhook(
     raise HTTPException(status_code=403, detail="Verification token mismatch")
 
 # -------------------------------------------------------------
-# 2. META WHATSAPP CLOUD API INCOMING MESSAGES (POST)
+# 2. META WHATSAPP SENDER (TEXT, NATIVE LISTS & BUTTONS)
 # -------------------------------------------------------------
-def send_whatsapp_message(to_phone: str, message_text: str):
-    """Sends a message back to the customer using Meta's WhatsApp Cloud API."""
+def send_whatsapp_payload(payload: Dict[str, Any]) -> bool:
+    """Sends any compliant WhatsApp Cloud API JSON payload to Meta."""
     if not WHATSAPP_TOKEN or not WHATSAPP_PHONE_NUMBER_ID:
-        print(f"[Notice] WhatsApp token not configured in .env. Reply output:\n{message_text}")
+        print(f"[Notice] WhatsApp token not configured in .env. Payload preview:\n{payload}")
         return False
         
     url = f"https://graph.facebook.com/v19.0/{WHATSAPP_PHONE_NUMBER_ID}/messages"
@@ -84,73 +92,133 @@ def send_whatsapp_message(to_phone: str, message_text: str):
         "Authorization": f"Bearer {WHATSAPP_TOKEN}",
         "Content-Type": "application/json"
     }
-    payload = {
-        "messaging_product": "whatsapp",
-        "to": to_phone,
-        "type": "text",
-        "text": {"body": message_text}
-    }
-    
     try:
         resp = requests.post(url, json=payload, headers=headers, timeout=10)
         resp.raise_for_status()
-        print(f"[WhatsApp Sent] Successfully sent reply to {to_phone}")
+        print(f"[WhatsApp Sent] Successfully delivered message to {payload.get('to')}")
         return True
     except Exception as e:
         print(f"[WhatsApp Send Error]: {e}")
         return False
 
+def send_whatsapp_response(to_phone: str, resp_dict: Dict[str, Any]):
+    """Dispatches the structured agent response to the customer via Meta WhatsApp Cloud API."""
+    msg_type = resp_dict.get("type", "text")
+    
+    if msg_type == "interactive_list" and "list_data" in resp_dict:
+        ld = resp_dict["list_data"]
+        payload = {
+            "messaging_product": "whatsapp",
+            "recipient_type": "individual",
+            "to": to_phone,
+            "type": "interactive",
+            "interactive": {
+                "type": "list",
+                "header": {"type": "text", "text": ld.get("header", "FC-Hut Menu")},
+                "body": {"text": ld.get("body", "Please select an item:")},
+                "footer": {"text": ld.get("footer", "")},
+                "action": {
+                    "button": ld.get("button_label", "View Menu"),
+                    "sections": ld.get("sections", [])
+                }
+            }
+        }
+    elif msg_type == "interactive_buttons" and "buttons_data" in resp_dict:
+        bd = resp_dict["buttons_data"]
+        payload = {
+            "messaging_product": "whatsapp",
+            "recipient_type": "individual",
+            "to": to_phone,
+            "type": "interactive",
+            "interactive": {
+                "type": "button",
+                "body": {"text": bd.get("body", "Please choose an option:")},
+                "action": {
+                    "buttons": [
+                        {"type": "reply", "reply": {"id": b["id"], "title": b["title"]}}
+                        for b in bd.get("buttons", [])
+                    ]
+                }
+            }
+        }
+    else:
+        # Standard text message
+        payload = {
+            "messaging_product": "whatsapp",
+            "recipient_type": "individual",
+            "to": to_phone,
+            "type": "text",
+            "text": {"body": resp_dict.get("text", "")}
+        }
+        
+    return send_whatsapp_payload(payload)
+
+# -------------------------------------------------------------
+# 3. META WHATSAPP CLOUD API INCOMING MESSAGES (POST)
+# -------------------------------------------------------------
 @app.post("/webhook")
 async def receive_webhook(request: Request):
     """
-    Receives incoming WhatsApp webhook payloads.
-    Supports standard Meta WhatsApp Cloud API format and custom JSON payloads for testing.
+    Receives incoming WhatsApp webhook payloads from Meta.
+    Handles standard text messages as well as interactive button & list clicks.
     """
     body = await request.json()
     
-    # 1. Handle Meta WhatsApp Cloud API structure
+    # 1. Handle Meta WhatsApp Cloud API payload
     if "entry" in body:
         for entry in body.get("entry", []):
             for change in entry.get("changes", []):
                 val = change.get("value", {})
                 messages = val.get("messages", [])
                 for msg in messages:
-                    if msg.get("type") == "text":
-                        sender_phone = msg.get("from")
-                        text = msg.get("text", {}).get("body", "")
+                    sender_phone = msg.get("from")
+                    msg_type = msg.get("type")
+                    
+                    if msg_type == "text":
+                        user_text = msg.get("text", {}).get("body", "")
+                        print(f"\n[Incoming Text] From: {sender_phone} | Text: {user_text}")
+                        reply_dict = agent.process_input(sender_phone, user_text=user_text)
+                        send_whatsapp_response(sender_phone, reply_dict)
                         
-                        print(f"\n[Incoming WhatsApp] From: {sender_phone} | Message: {text}")
-                        reply = agent.handle_message(sender_phone, text)
-                        print(f"[Agent Reply]:\n{reply}\n")
+                    elif msg_type == "interactive":
+                        interactive = msg.get("interactive", {})
+                        itype = interactive.get("type")  # "list_reply" or "button_reply"
+                        reply_obj = interactive.get(itype, {})
+                        item_id = reply_obj.get("id")
+                        item_title = reply_obj.get("title", "")
                         
-                        send_whatsapp_message(sender_phone, reply)
+                        print(f"\n[Incoming Click] From: {sender_phone} | Type: {itype} | ID: {item_id} | Title: {item_title}")
+                        reply_dict = agent.process_input(sender_phone, interactive_id=item_id)
+                        send_whatsapp_response(sender_phone, reply_dict)
                         
         return JSONResponse(content={"status": "received"}, status_code=200)
 
     # 2. Simplified fallback for direct testing (e.g. Postman or cURL)
     sender = body.get("phone", "+923001234567")
-    text = body.get("message", "")
-    if text:
-        reply = agent.handle_message(sender, text)
-        return {"sender": sender, "reply": reply}
-        
-    return JSONResponse(content={"status": "ignored"}, status_code=200)
+    user_text = body.get("message")
+    interactive_id = body.get("interactive_id")
+    
+    reply_dict = agent.process_input(sender, user_text=user_text, interactive_id=interactive_id)
+    return {"sender": sender, "response": reply_dict}
 
 # -------------------------------------------------------------
-# 3. DIRECT TEST CHAT ENDPOINT (FOR CONVENIENT TESTING)
+# 4. DIRECT TEST CHAT ENDPOINT
 # -------------------------------------------------------------
 class TestChatRequest(BaseModel):
     phone: str = "+923001234567"
-    message: str
+    message: Optional[str] = None
+    interactive_id: Optional[str] = None
 
 @app.post("/test-chat")
 def test_chat(req: TestChatRequest):
-    """Direct endpoint to test the agent without needing WhatsApp configured."""
-    reply = agent.handle_message(req.phone, req.message)
+    """Direct endpoint to test the agent with text or button clicks."""
+    resp = agent.process_input(req.phone, user_text=req.message, interactive_id=req.interactive_id)
     return {
         "customer_phone": req.phone,
-        "message": req.message,
-        "reply": reply
+        "input_message": req.message,
+        "input_interactive_id": req.interactive_id,
+        "reply": resp.get("text", ""),
+        "response": resp
     }
 
 if __name__ == "__main__":

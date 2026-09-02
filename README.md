@@ -6,22 +6,43 @@ All pricing is in **PKR (Rs.)**, inventory is pre-seeded in SQLite with atomic s
 
 ---
 
-## 🚀 Quick Start (Test in 10 Seconds)
+## 🚀 Quick Start (Test Native Buttons in 10 Seconds)
 
-You can interact with the agent right now in your terminal without needing any WhatsApp account or API key setup:
+You can interact with the agent right now in your terminal. It visually simulates WhatsApp's native interactive buttons and list menus:
 
 ```bash
 python simulate_chat.py
 ```
 
-### Try these commands in the simulator:
-- `hi` / `salam`
-- `show menu` (displays all products and live stock)
-- `do you have wings in stock?`
-- `I want 2 nuggets to House 14, Street 5, F-8/2, Islamabad`
-- `/stock` (inspect live database inventory in real-time)
-- `/orders` (inspect all placed orders and total PKR)
-- `/reset` (re-seed inventory with fresh random quantities)
+### Try this in the simulator:
+1. **Browse List Menu**: Type `10` or tap any option (1-10) to choose an item (e.g. Samosas).
+2. **Select Quantity**: Type `B` or `2` to tap the `[ 2 Packs ]` button.
+3. **Enter Address**: Type `House 12, Street 4, Islamabad`.
+4. **Confirm Order**: Type `A` or `1` to tap `[ ✅ Confirm Order ]`.
+5. **Inspect Live Stock**: Type `/stock` to see that stock was automatically decremented in the SQLite database!
+
+---
+
+## 💡 Typo & Roman Urdu Tolerance
+
+Customers rarely write exact dictionary spellings on WhatsApp. The agent automatically handles:
+- **Samosas**: `samosiyan`, `samose`, `samosay`, `samosi`
+- **Nuggets**: `nagats`, `nagat`, `nugets`, `nagits`
+- **Tenders**: `tandar`, `tandars`
+- **Kababs**: `kababain`, `chapli kabab`, `seekh`
+
+Even if a customer types *"bhai 2 packet samosiyan bhej do"*, the agent seamlessly maps it to **Crispy Chicken Samosas** and asks for their address!
+
+---
+
+## 📱 WhatsApp Native Interactive Features
+
+- **Native List Menu (`list`)**:
+  - Pops up a native scrollable list of all frozen items with live pack sizes and PKR prices.
+  - Zero spelling errors possible — customer simply taps their choice.
+- **Quick Reply Buttons (`button`)**:
+  - `[ 1 Pack ]` `[ 2 Packs ]` `[ 3 Packs ]` for instant quantity selection.
+  - `[ ✅ Confirm Order ]` `[ ❌ Cancel ]` for final confirmation.
 
 ---
 

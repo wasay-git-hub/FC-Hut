@@ -50,6 +50,16 @@ def init_db():
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+
+        # Customer session state for interactive buttons flow
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS customer_sessions (
+                customer_phone TEXT PRIMARY KEY,
+                state TEXT NOT NULL DEFAULT 'IDLE',
+                pending_data_json TEXT NOT NULL DEFAULT '{}',
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
         conn.commit()
 
 def seed_products(force: bool = False):
@@ -66,6 +76,7 @@ def seed_products(force: bool = False):
         # Clear existing if force is True
         if force:
             cursor.execute("DELETE FROM products")
+            cursor.execute("DELETE FROM sqlite_sequence WHERE name = 'products'")
             
         initial_items = [
             ("Crispy Chicken Nuggets (1kg)", "Nuggets", "1kg pack", 1450, random.randint(10, 25)),
@@ -268,6 +279,94 @@ def save_chat_history(customer_phone: str, history: List[Dict[str, str]]):
                 updated_at = CURRENT_TIMESTAMP
         """, (customer_phone, json.dumps(trimmed)))
         conn.commit()
+
+def get_product_by_id(product_id: int) -> Optional[Dict[str, Any]]:
+    """Retrieves a single product by its database ID."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM products WHERE id = ?", (product_id,))
+        row = cursor.fetchone()
+        return dict(row) if row else None
+
+# Product aliases for typo and Roman Urdu tolerance
+PRODUCT_KEYWORD_MAP = [
+    ("%Samosa%", ["samosa", "samosay", "samose", "samosiyan", "samosi", "somosa"]),
+    ("%Crispy Chicken Nuggets (1kg)%", ["crispy nugget", "1kg nugget", "nagats", "nagat", "nugets", "1kg nuggets"]),
+    ("%Tempura Nuggets%", ["tempura", "tempura nugget", "tempura nuggets", "500g nugget"]),
+    ("%Tenders%", ["tender", "tenders", "crispy tender", "tandar", "tandars"]),
+    ("%Wings%", ["wing", "wings", "buffalo", "buffalo wing", "buffalo wings", "spicy wing"]),
+    ("%Cheese Balls%", ["cheese ball", "cheese balls", "ball", "balls"]),
+    ("%Fillets%", ["fillet", "fillets", "zinger", "zinger fillet", "burger patty", "patty"]),
+    ("%Popcorn%", ["popcorn", "popcorn chicken", "chicken popcorn"]),
+    ("%Chapli%", ["chapli", "chapli kabab", "chapli kababs", "kababain"]),
+    ("%Seekh%", ["seekh", "seekh kabab", "seekh kababs", "sikh kabab"])
+]
+
+def match_product_by_text(user_text: str) -> Optional[Dict[str, Any]]:
+    """Matches text against product IDs, names, or Roman Urdu/spelling aliases."""
+    text = user_text.lower().strip()
+    
+    # 1. Explicit ID match (e.g. "prod_10", "#10", "item 10", or just "10")
+    import re
+    explicit_id = re.match(r'^(?:prod_|^#|^item\s*)?(\d{1,2})$', text)
+    if explicit_id:
+        pid = int(explicit_id.group(1))
+        prod = get_product_by_id(pid)
+        if prod:
+            return prod
+            
+    # 2. Match against Roman Urdu & typo aliases
+    with get_db() as conn:
+        cursor = conn.cursor()
+        for name_pattern, aliases in PRODUCT_KEYWORD_MAP:
+            for alias in aliases:
+                # check as whole word or substring
+                if re.search(r'\b' + re.escape(alias) + r'\b', text) or alias in text:
+                    cursor.execute("SELECT * FROM products WHERE name LIKE ? LIMIT 1", (name_pattern,))
+                    row = cursor.fetchone()
+                    if row:
+                        return dict(row)
+                
+    # 3. Direct database substring match
+    matches = check_stock(text)
+    if matches:
+        return matches[0]
+        
+    return None
+
+def get_session(customer_phone: str) -> Dict[str, Any]:
+    """Gets the interactive ordering session for a customer."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT state, pending_data_json FROM customer_sessions WHERE customer_phone = ?", (customer_phone,))
+        row = cursor.fetchone()
+        if row:
+            try:
+                data = json.loads(row["pending_data_json"])
+            except Exception:
+                data = {}
+            return {"state": row["state"], "data": data}
+        return {"state": "IDLE", "data": {}}
+
+def set_session(customer_phone: str, state: str, data: Dict[str, Any] = None):
+    """Sets the current state and pending order data for a customer."""
+    if data is None:
+        data = {}
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO customer_sessions (customer_phone, state, pending_data_json, updated_at)
+            VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(customer_phone) DO UPDATE SET 
+                state = excluded.state,
+                pending_data_json = excluded.pending_data_json,
+                updated_at = CURRENT_TIMESTAMP
+        """, (customer_phone, state, json.dumps(data)))
+        conn.commit()
+
+def clear_session(customer_phone: str):
+    """Resets the customer session back to IDLE."""
+    set_session(customer_phone, "IDLE", {})
 
 if __name__ == "__main__":
     init_db()

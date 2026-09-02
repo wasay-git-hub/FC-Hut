@@ -15,11 +15,12 @@ def run_e2e_test():
     
     agent = FCHutAgent()
     phone = "+923009876543"
+    database.clear_session(phone)
     
     print("\n--- 2. Customer: Greeting ---")
     resp = agent.handle_message(phone, "Assalam o alaikum")
     print(f"Agent:\n{resp}")
-    assert "FC-Hut" in resp, "Greeting should mention FC-Hut"
+    assert "fc-hut" in resp.lower(), "Greeting should mention FC-Hut"
 
     print("\n--- 3. Customer: Ask Menu ---")
     resp = agent.handle_message(phone, "Please show me the menu and prices")
@@ -29,7 +30,7 @@ def run_e2e_test():
     print("\n--- 4. Customer: Check Stock for Wings ---")
     resp = agent.handle_message(phone, "Do you have wings in stock?")
     print(f"Agent:\n{resp}")
-    assert "Wings" in resp, "Stock check should find wings"
+    assert "Wings" in resp or "wings" in resp, "Stock check should find wings"
 
     print("\n--- 5. Customer: Place Order with Delivery Address ---")
     # Check initial nuggets stock
@@ -37,10 +38,15 @@ def run_e2e_test():
     initial_stock = initial_nuggets["stock_qty"]
     print(f"Pre-order stock for {initial_nuggets['name']}: {initial_stock}")
     
-    order_msg = "I want 2 nuggets to House 15, Street 4, Sector F-7/2, Islamabad"
+    order_msg = f"I want 2 {initial_nuggets['name']} to House 15, Street 4, Sector F-7/2, Islamabad"
     resp = agent.handle_message(phone, order_msg)
-    print(f"Agent:\n{resp}")
-    assert "ORDER CONFIRMED" in resp or "Order Details" in resp, "Should confirm order or record details"
+    print(f"Agent Summary:\n{resp}")
+    assert "ORDER SUMMARY" in resp or "Selected:" in resp
+    
+    # Customer confirms
+    confirm_resp = agent.handle_message(phone, "Yes please confirm")
+    print(f"Agent Confirmation:\n{confirm_resp}")
+    assert "ORDER CONFIRMED" in confirm_resp, "Should confirm order"
     
     # Check updated stock of the exact item ordered
     with database.get_db() as conn:

@@ -1,4 +1,5 @@
 import os
+import re
 import json
 from typing import List, Dict, Any, Optional
 from dotenv import load_dotenv
@@ -6,215 +7,342 @@ import database
 
 load_dotenv()
 
-SYSTEM_INSTRUCTION = """
-You are 'Hutty', the helpful and friendly WhatsApp sales assistant for 'FC-Hut' (Frozen Chicken Hut), 
-a premium frozen chicken fried food business based in Pakistan.
-
-Your Core Rules:
-1. CURRENCY: All prices are strictly in Pakistani Rupees (PKR / Rs.).
-2. STOCK & INVENTORY INTEGRITY:
-   - NEVER make up or hallucinate stock quantities or prices.
-   - Use the `check_stock` or `get_menu` tools to verify availability before answering questions about products.
-   - If an item is out of stock or low in stock, politely inform the customer and suggest available alternatives.
-3. ORDER PLACEMENT FLOW:
-   - When a customer wants to buy items, check availability first.
-   - Before placing the order, you MUST collect:
-     a) Exact items and quantities
-     b) Customer name (or nickname)
-     c) Complete delivery address
-   - Once all details are known, provide a clear order summary with line items, quantities, subtotal, and delivery address.
-   - Ask for confirmation ("Should I confirm this order for you?").
-   - Once the customer says yes/confirms, call `place_order`.
-   - Never call `place_order` until the customer explicitly agrees to the summary and you have their delivery address.
-4. TONE & STYLE:
-   - Warm, welcoming, respectful, and concise (ideal for WhatsApp chats).
-   - Reply in the language the customer speaks (English or Roman Urdu).
-"""
-
-# Tool functions exposed to the AI model
-def get_available_menu() -> str:
-    """Returns the current menu of all frozen chicken items with pack sizes, prices in PKR, and stock."""
+def build_menu_list_response() -> Dict[str, Any]:
+    """Builds a WhatsApp Native Interactive List message containing all menu items and live stock."""
     menu = database.get_menu()
-    lines = ["📋 *FC-HUT MENU & LIVE STOCK:*"]
-    for item in menu:
-        status = f"✅ In Stock ({item['stock_qty']} packs)" if item['stock_qty'] > 0 else "❌ Out of Stock"
-        lines.append(f"• *{item['name']}* ({item['pack_size']}) - Rs. {item['price_pkr']:,} [{status}]")
-    return "\n".join(lines)
-
-def check_item_stock(query: str = "") -> str:
-    """Checks inventory count and price for specific items or categories (e.g. 'nuggets', 'wings', 'tenders')."""
-    items = database.check_stock(query)
-    if not items:
-        return f"No items found matching '{query}'. Try asking for nuggets, wings, tenders, kababs, or fillets."
-    lines = [f"🔍 *Stock check for '{query}':*"]
-    for item in items:
-        status = f"✅ {item['stock_qty']} packs available" if item['stock_qty'] > 0 else "❌ Sold out"
-        lines.append(f"• *{item['name']}* - Rs. {item['price_pkr']:,} ({status})")
-    return "\n".join(lines)
-
-def execute_order(
-    customer_phone: str,
-    customer_name: str,
-    delivery_address: str,
-    items: List[Dict[str, Any]]
-) -> str:
-    """
-    Places an order atomically and deducts inventory.
-    Each item must have 'product_id' (int) or 'name' (str), and 'quantity' (int).
-    """
-    result = database.place_order_atomic(
-        customer_phone=customer_phone,
-        customer_name=customer_name,
-        delivery_address=delivery_address,
-        items=items
-    )
-    if not result.get("success"):
-        return f"❌ Order failed: {result.get('error')}"
+    rows = []
+    text_lines = ["📋 *FC-HUT MENU & LIVE STOCK:*"]
     
-    order_id = result["order_id"]
-    total = result["total_pkr"]
-    lines = [
-        f"🎉 *ORDER CONFIRMED! (Order #{order_id})*",
-        f"👤 Customer: {result['customer_name']}",
-        f"📍 Address: {result['delivery_address']}",
-        "📦 *Items:*",
-    ]
-    for item in result["items"]:
-        lines.append(f"  • {item['quantity']}x {item['name']} ({item['pack_size']}) = Rs. {item['subtotal_pkr']:,}")
-    lines.append(f"\n💰 *Total Amount: Rs. {total:,} (Cash on Delivery)*")
-    lines.append("🛵 Your frozen chicken items will be dispatched shortly in insulated cold bags. Thank you for choosing FC-Hut! 🍗")
-    return "\n".join(lines)
+    for p in menu:
+        status_desc = f"Rs. {p['price_pkr']:,} | In Stock ({p['stock_qty']} pk)" if p['stock_qty'] > 0 else f"Rs. {p['price_pkr']:,} | Out of stock"
+        text_lines.append(f"• *{p['name']}* ({p['pack_size']}) - Rs. {p['price_pkr']:,} [{'✅ In Stock' if p['stock_qty'] > 0 else '❌ Out of stock'}]")
+        
+        # Meta limits: title <= 24 chars, description <= 72 chars
+        short_title = p['name'][:24]
+        rows.append({
+            "id": f"prod_{p['id']}",
+            "title": short_title,
+            "description": status_desc[:72]
+        })
+        
+    fallback_text = "\n".join(text_lines) + "\n\n👉 *Reply with an item name or number to order!*"
+    
+    return {
+        "type": "interactive_list",
+        "text": fallback_text,
+        "list_data": {
+            "header": "FC-Hut Menu & Stock",
+            "body": "👋 Salam & welcome to *FC-Hut*! 🍗\nAll items are blast-frozen & fresh. Tap below to choose your item:",
+            "footer": "Prices in PKR | Cash on Delivery",
+            "button_label": "🍗 View Menu & Stock",
+            "sections": [
+                {
+                    "title": "Frozen Fried Chicken",
+                    "rows": rows
+                }
+            ]
+        }
+    }
+
+def build_quantity_buttons_response(prod: Dict[str, Any]) -> Dict[str, Any]:
+    """Builds WhatsApp Native Quick Reply buttons for quantity selection."""
+    body_text = (
+        f"🍗 *{prod['name']}* ({prod['pack_size']})\n"
+        f"💰 Price: Rs. {prod['price_pkr']:,} per pack\n"
+        f"📦 Available: {prod['stock_qty']} packs in stock\n\n"
+        f"How many packs would you like to order?"
+    )
+    return {
+        "type": "interactive_buttons",
+        "text": body_text + "\n(Tap a button below or type a number like 4):",
+        "buttons_data": {
+            "body": body_text,
+            "buttons": [
+                {"id": "qty_1", "title": "1 Pack"},
+                {"id": "qty_2", "title": "2 Packs"},
+                {"id": "qty_3", "title": "3 Packs"}
+            ]
+        }
+    }
+
+def build_confirmation_buttons_response(
+    prod: Dict[str, Any],
+    qty: int,
+    subtotal: int,
+    address: str
+) -> Dict[str, Any]:
+    """Builds WhatsApp Native Quick Reply buttons for final order confirmation."""
+    body_text = (
+        f"📋 *ORDER SUMMARY:*\n"
+        f"• Item: {qty}x {prod['name']} ({prod['pack_size']})\n"
+        f"• Subtotal: Rs. {subtotal:,}\n"
+        f"📍 Delivery Address: {address}\n"
+        f"💰 Total: Rs. {subtotal:,} (Cash on Delivery)\n\n"
+        f"Should I confirm and dispatch this order?"
+    )
+    return {
+        "type": "interactive_buttons",
+        "text": body_text,
+        "buttons_data": {
+            "body": body_text,
+            "buttons": [
+                {"id": "order_confirm", "title": "✅ Confirm Order"},
+                {"id": "order_cancel", "title": "❌ Cancel"}
+            ]
+        }
+    }
 
 class FCHutAgent:
     def __init__(self):
         self.api_key = os.getenv("GEMINI_API_KEY", "").strip()
         self.use_gemini = bool(self.api_key and self.api_key != "your_gemini_api_key_here")
-        self.model = None
 
-        if self.use_gemini:
+    def process_input(
+        self,
+        customer_phone: str,
+        user_text: str = "",
+        interactive_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Main entry point for processing customer input.
+        Handles both text messages and native interactive button/list clicks.
+        Returns a structured dictionary with 'type', 'text', and optional 'list_data' / 'buttons_data'.
+        """
+        user_text = (user_text or "").strip()
+        interactive_id = (interactive_id or "").strip()
+        
+        session = database.get_session(customer_phone)
+        current_state = session.get("state", "IDLE")
+        pending_data = session.get("data", {})
+        
+        # -------------------------------------------------------------
+        # GLOBAL RESET / CANCEL
+        # -------------------------------------------------------------
+        if interactive_id == "order_cancel" or user_text.lower() in ["cancel", "reset", "stop", "abort", "wapas"]:
+            database.clear_session(customer_phone)
+            resp = build_menu_list_response()
+            resp["text"] = "❌ Order cancelled.\n\n" + resp["text"]
+            resp["list_data"]["body"] = "Order cancelled. Tap below to start a new order anytime:"
+            return resp
+
+        # -------------------------------------------------------------
+        # 1. BUTTON / LIST SELECTION HANDLING
+        # -------------------------------------------------------------
+        # Case A: Product selected from list menu (e.g. "prod_1", "prod_10")
+        if interactive_id.startswith("prod_"):
             try:
-                import google.generativeai as genai
-                genai.configure(api_key=self.api_key)
-                
-                # Register tools
-                tools = [
-                    get_available_menu,
-                    check_item_stock,
-                    execute_order
-                ]
-                
-                self.model = genai.GenerativeModel(
-                    model_name="gemini-1.5-flash",
-                    system_instruction=SYSTEM_INSTRUCTION,
-                    tools=tools
-                )
+                prod_id = int(interactive_id.replace("prod_", ""))
+                prod = database.get_product_by_id(prod_id)
+                if not prod:
+                    return {"type": "text", "text": "❌ Product not found. Please choose an item from the menu."}
+                if prod["stock_qty"] <= 0:
+                    resp = build_menu_list_response()
+                    resp["text"] = f"❌ Sorry, *{prod['name']}* is currently sold out! Please choose another item:\n\n" + resp["text"]
+                    return resp
+                    
+                # Transition to AWAITING_QTY
+                database.set_session(customer_phone, "AWAITING_QTY", {"prod_id": prod["id"]})
+                return build_quantity_buttons_response(prod)
             except Exception as e:
-                print(f"[Agent Warning] Failed to initialize Gemini model: {e}. Running in standalone mode.")
-                self.use_gemini = False
+                return {"type": "text", "text": f"Error selecting product: {e}"}
 
-    def handle_message(self, customer_phone: str, user_message: str) -> str:
-        """Processes an incoming customer message and generates an agent response."""
-        # Retrieve previous chat history
-        history = database.get_chat_history(customer_phone)
-        
-        if self.use_gemini and self.model:
-            response_text = self._handle_with_gemini(customer_phone, user_message, history)
-        else:
-            response_text = self._handle_standalone(customer_phone, user_message, history)
-            
-        # Update and save chat history
-        history.append({"role": "user", "parts": [user_message]})
-        history.append({"role": "model", "parts": [response_text]})
-        database.save_chat_history(customer_phone, history)
-        
-        return response_text
+        # Case B: Quantity button tapped (e.g. "qty_1", "qty_2", "qty_3")
+        if interactive_id.startswith("qty_"):
+            try:
+                qty = int(interactive_id.replace("qty_", ""))
+                return self._handle_quantity_selected(customer_phone, pending_data, qty)
+            except Exception as e:
+                return {"type": "text", "text": f"Error selecting quantity: {e}"}
 
-    def _handle_with_gemini(self, customer_phone: str, user_message: str, history: List[Dict[str, Any]]) -> str:
-        """Handles chat using Gemini's native multi-turn chat and function calling."""
-        import google.generativeai as genai
-        
-        try:
-            # Reconstruct chat session with tool handling
-            # Inject phone context into user message so tool can access it
-            chat = self.model.start_chat(enable_automatic_function_calling=True)
-            
-            # Replay history
-            context_prompt = f"[Customer Phone: {customer_phone}]\nCustomer message: {user_message}"
-            response = chat.send_message(context_prompt)
-            return response.text
-        except Exception as e:
-            print(f"[Gemini Error]: {e}, falling back to standalone handler.")
-            return self._handle_standalone(customer_phone, user_message, history)
+        # Case C: Order Confirmation button tapped ("order_confirm")
+        if interactive_id == "order_confirm":
+            return self._handle_order_confirmed(customer_phone, pending_data)
 
-    def _handle_standalone(self, customer_phone: str, user_message: str, history: List[Dict[str, Any]]) -> str:
-        """
-        Standalone rule-based assistant when Gemini API key is not yet configured.
-        Allows instant testing of menu, stock checking, and ordering.
-        """
-        msg = user_message.lower().strip()
-        
-        # 1. Greetings
-        if any(w in msg for w in ["hi", "hello", "hey", "salam", "assalam"]):
-            return (
-                "👋 Salam & welcome to *FC-Hut (Frozen Chicken Hut)*! 🍗\n"
-                "We provide premium frozen fried chicken items (Nuggets, Wings, Tenders, Patties, Kababs).\n\n"
-                "How can I help you today?\n"
-                "• Type *'menu'* to see all items & prices\n"
-                "• Type *'stock nuggets'* to check availability\n"
-                "• Or tell me what you'd like to order!"
-            )
-            
-        # 2. Menu inquiry
-        if any(w in msg for w in ["menu", "list", "items", "kya hai", "rate", "price"]):
-            return get_available_menu()
-            
-        # 3. Stock inquiry
-        if any(w in msg for w in ["stock", "available", "have", "hai", "hoga"]):
-            # Extract possible product keywords
-            keywords = ["nugget", "wing", "tender", "fillet", "ball", "popcorn", "kabab", "samosa"]
-            matched = [k for k in keywords if k in msg]
-            query = matched[0] if matched else ""
-            return check_item_stock(query)
+        # -------------------------------------------------------------
+        # 2. STATE MACHINE HANDLING FOR TEXT INPUT
+        # -------------------------------------------------------------
+        # Check if customer changed their mind and mentioned a different product
+        new_prod_match = database.match_product_by_text(user_text) if current_state != "AWAITING_CONFIRM" else None
 
-        # 4. Ordering / confirmation
-        # Check if customer provides address or order
-        all_prods = database.get_menu()
-        ordered_items = []
-        for prod in all_prods:
-            short_name = prod["name"].lower().split()[1] if len(prod["name"].split()) > 1 else prod["name"].lower()
-            if short_name in msg:
-                # Find quantity
-                import re
-                qty_match = re.search(r'(\d+)\s*(?:pack|box|kg|piece|x)?\s*' + re.escape(short_name), msg)
-                qty = int(qty_match.group(1)) if qty_match else 1
-                ordered_items.append({"product_id": prod["id"], "quantity": qty})
+        if current_state == "AWAITING_QTY":
+            # If user mentioned a different product entirely, switch to it!
+            if new_prod_match and new_prod_match["id"] != pending_data.get("prod_id"):
+                database.clear_session(customer_phone)
+                # re-process as fresh product request
+                return self.process_input(customer_phone, user_text=user_text)
 
-        if ordered_items:
-            # Check if address is mentioned
-            if any(w in msg for w in ["street", "house", "sector", "road", "f-", "g-", "i-", "lahore", "islamabad", "karachi", "block"]):
-                # Customer included address! Place order directly
-                return execute_order(
-                    customer_phone=customer_phone,
-                    customer_name="Customer",
-                    delivery_address=user_message,
-                    items=ordered_items
-                )
+            # Extract quantity from text (e.g. "2", "3 packs", "two")
+            qty_match = re.search(r'\b(\d+)\b', user_text)
+            if qty_match:
+                qty = int(qty_match.group(1))
+                return self._handle_quantity_selected(customer_phone, pending_data, qty)
             else:
-                # Ask for address
-                lines = ["📝 *Order Details Recorded:*"]
-                total = 0
-                for item in ordered_items:
-                    p = next(p for p in all_prods if p["id"] == item["product_id"])
-                    sub = p["price_pkr"] * item["quantity"]
-                    total += sub
-                    lines.append(f"• {item['quantity']}x {p['name']} = Rs. {sub:,}")
-                lines.append(f"\n💰 *Subtotal: Rs. {total:,}*")
-                lines.append("\n📍 *Please reply with your Delivery Address* to confirm and dispatch your order!")
-                return "\n".join(lines)
+                prod = database.get_product_by_id(pending_data.get("prod_id"))
+                if prod:
+                    return {
+                        "type": "text",
+                        "text": f"Please specify how many packs of *{prod['name']}* you want (e.g., tap a button or type 1, 2, 3):"
+                    }
 
-        return (
-            "🍗 *FC-Hut Assistant:*\n"
-            "I can help you check stock and place orders for frozen chicken items.\n"
-            "• Ask me: *'What are the prices of nuggets?'*\n"
-            "• Or say: *'I want 2 packs of Crispy Tenders to House 5, Street 2, Islamabad'*"
+        elif current_state == "AWAITING_ADDRESS":
+            # Customer sent address text
+            if len(user_text) < 5:
+                return {
+                    "type": "text",
+                    "text": "📍 Please provide a complete delivery address (House #, Street, Area/City) so our rider can deliver your order."
+                }
+                
+            pending_data["address"] = user_text
+            database.set_session(customer_phone, "AWAITING_CONFIRM", pending_data)
+            
+            prod = database.get_product_by_id(pending_data["prod_id"])
+            qty = pending_data["qty"]
+            subtotal = pending_data["subtotal"]
+            return build_confirmation_buttons_response(prod, qty, subtotal, user_text)
+
+        elif current_state == "AWAITING_CONFIRM":
+            if any(w in user_text.lower() for w in ["yes", "confirm", "haan", "ok", "done", "theek", "bhej do"]):
+                return self._handle_order_confirmed(customer_phone, pending_data)
+            elif any(w in user_text.lower() for w in ["no", "cancel", "nahi", "change"]):
+                database.clear_session(customer_phone)
+                resp = build_menu_list_response()
+                resp["text"] = "❌ Order cancelled. Tap below to start over:\n\n" + resp["text"]
+                return resp
+            else:
+                prod = database.get_product_by_id(pending_data["prod_id"])
+                return build_confirmation_buttons_response(
+                    prod,
+                    pending_data["qty"],
+                    pending_data["subtotal"],
+                    pending_data["address"]
+                )
+
+        # -------------------------------------------------------------
+        # 3. IDLE / GENERAL CHAT (Fuzzy product matching & greetings)
+        # -------------------------------------------------------------
+        # Check if customer mentions a product directly (e.g., "samosiyan", "nuggets", "2 tenders")
+        matched_product = database.match_product_by_text(user_text)
+        if matched_product:
+            if matched_product["stock_qty"] <= 0:
+                resp = build_menu_list_response()
+                resp["text"] = f"❌ *{matched_product['name']}* is currently out of stock. Please check other items:\n\n" + resp["text"]
+                return resp
+                
+            # Check if quantity was also mentioned (e.g. "2 samosiyan")
+            qty_match = re.search(r'\b(\d+)\b', user_text)
+            if qty_match:
+                qty = int(qty_match.group(1))
+                if 1 <= qty <= matched_product["stock_qty"]:
+                    pending_data = {
+                        "prod_id": matched_product["id"],
+                        "qty": qty,
+                        "subtotal": matched_product["price_pkr"] * qty
+                    }
+                    # Check if address was also provided in the same message
+                    if any(w in user_text.lower() for w in ["house", "street", "sector", "road", "block", "phase", "flat", "islamabad", "lahore", "karachi", "rawalpindi"]):
+                        pending_data["address"] = user_text
+                        database.set_session(customer_phone, "AWAITING_CONFIRM", pending_data)
+                        return build_confirmation_buttons_response(
+                            matched_product,
+                            qty,
+                            pending_data["subtotal"],
+                            user_text
+                        )
+
+                    database.set_session(customer_phone, "AWAITING_ADDRESS", pending_data)
+                    return {
+                        "type": "text",
+                        "text": (
+                            f"✅ Selected: *{qty}x {matched_product['name']}* = Rs. {pending_data['subtotal']:,}\n\n"
+                            f"📍 *Please reply with your complete Delivery Address* (House #, Street, City) to finalize your order:"
+                        )
+                    }
+
+            # Otherwise, ask for quantity with buttons
+            database.set_session(customer_phone, "AWAITING_QTY", {"prod_id": matched_product["id"]})
+            return build_quantity_buttons_response(matched_product)
+
+        # Greetings or general inquiry -> Show interactive menu list
+        return build_menu_list_response()
+
+    def _handle_quantity_selected(
+        self,
+        customer_phone: str,
+        pending_data: Dict[str, Any],
+        qty: int
+    ) -> Dict[str, Any]:
+        prod_id = pending_data.get("prod_id")
+        prod = database.get_product_by_id(prod_id)
+        if not prod:
+            database.clear_session(customer_phone)
+            return build_menu_list_response()
+            
+        if qty <= 0:
+            return {"type": "text", "text": "Please enter a valid quantity of at least 1."}
+            
+        if qty > prod["stock_qty"]:
+            return {
+                "type": "text",
+                "text": f"⚠️ Sorry, only *{prod['stock_qty']} packs* of *{prod['name']}* are available right now. Please choose a quantity up to {prod['stock_qty']}."
+            }
+
+        subtotal = prod["price_pkr"] * qty
+        pending_data["qty"] = qty
+        pending_data["subtotal"] = subtotal
+        
+        database.set_session(customer_phone, "AWAITING_ADDRESS", pending_data)
+        
+        return {
+            "type": "text",
+            "text": (
+                f"✅ Selected: *{qty}x {prod['name']}* = Rs. {subtotal:,}\n\n"
+                f"📍 *Please reply with your complete Delivery Address* (House #, Street, City) to finalize your order:"
+            )
+        }
+
+    def _handle_order_confirmed(
+        self,
+        customer_phone: str,
+        pending_data: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        prod_id = pending_data.get("prod_id")
+        qty = pending_data.get("qty", 1)
+        address = pending_data.get("address", "")
+        
+        prod = database.get_product_by_id(prod_id)
+        if not prod:
+            database.clear_session(customer_phone)
+            return {"type": "text", "text": "❌ Order session expired. Please start again by typing 'menu'."}
+            
+        # Atomic order placement & stock deduction
+        result = database.place_order_atomic(
+            customer_phone=customer_phone,
+            customer_name="Valued Customer",
+            delivery_address=address,
+            items=[{"product_id": prod_id, "quantity": qty}]
         )
+        
+        # Clear session after order attempt
+        database.clear_session(customer_phone)
+        
+        if not result.get("success"):
+            return {
+                "type": "text",
+                "text": f"❌ Could not confirm order: {result.get('error')}\nPlease tap below to choose another item."
+            }
+            
+        order_id = result["order_id"]
+        total = result["total_pkr"]
+        receipt_text = (
+            f"🎉 *ORDER CONFIRMED! (Order #{order_id})*\n\n"
+            f"📦 *Item:* {qty}x {prod['name']} ({prod['pack_size']})\n"
+            f"💰 *Total:* Rs. {total:,} (Cash on Delivery)\n"
+            f"📍 *Delivery To:* {address}\n\n"
+            f"🛵 Your frozen chicken items will be dispatched shortly. Thank you for choosing FC-Hut! 🍗"
+        )
+        return {"type": "text", "text": receipt_text}
+
+    # Backward compatibility method for string text responses
+    def handle_message(self, customer_phone: str, user_message: str) -> str:
+        resp = self.process_input(customer_phone, user_text=user_message)
+        return resp.get("text", "")
