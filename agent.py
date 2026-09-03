@@ -126,9 +126,9 @@ class FCHutAgent:
             try:
                 import google.generativeai as genai
                 genai.configure(api_key=self.api_key)
-                self.model = genai.GenerativeModel("gemini-1.5-flash")
+                # Use current supported Gemini Flash model
+                self.model = genai.GenerativeModel("gemini-2.5-flash")
             except Exception as e:
-                print(f"[Agent Warning] Failed to initialize Gemini model: {e}")
                 self.use_gemini = False
 
     def _analyze_with_llm_brain(
@@ -140,8 +140,7 @@ class FCHutAgent:
     ) -> Dict[str, Any]:
         """
         Cognitive Brain: Uses Gemini Flash to analyze the customer's message in context.
-        Determines if they are continuing the flow, greeting anew after ghosting, switching products,
-        asking a general question, or requesting exit/main menu.
+        Falls back smoothly to the smart heuristic engine if the API key has restrictions or errors.
         """
         if not self.use_gemini or not self.model:
             return self._heuristic_brain_fallback(customer_message, session_state, current_prod_name)
@@ -158,7 +157,7 @@ Categorize the intent into ONE of:
 - "CANCEL_EXIT": Customer says menu, main menu, cancel, exit, stop, wapas, restart, shuru se.
 - "NEW_START": Customer sends a greeting (hi, salam, hello, hey, aalam), or returns after ghosting asking a new general greeting.
 - "TOPIC_SWITCH": Customer was ordering an active product, but explicitly asks about a DIFFERENT product (e.g. asking "are kababs available?" or "show me wings").
-- "ANSWER_STEP": Customer is answering the question for the current step (giving quantity e.g. "3 packets" or "do packet", giving address/phone, or answering yes/no).
+- "ANSWER_STEP": Customer is answering the question for the current step (giving quantity e.g. "3 packets" or "do packet" or "2", giving address/phone, or answering yes/no).
 - "GENERAL_QUESTION": Customer asks about store location, delivery areas, cooking instructions.
 
 Extract entities if present:
@@ -183,7 +182,8 @@ Return ONLY valid JSON matching this schema:
             data = json.loads(resp.text)
             return data
         except Exception as e:
-            print(f"[LLM Brain Warning]: {e}. Using heuristic brain.")
+            # Disable repeating warnings if API key is invalid/restricted
+            self.use_gemini = False
             return self._heuristic_brain_fallback(customer_message, session_state, current_prod_name)
 
     def _heuristic_brain_fallback(
@@ -192,7 +192,7 @@ Return ONLY valid JSON matching this schema:
         session_state: str,
         current_prod_name: Optional[str]
     ) -> Dict[str, Any]:
-        """Intelligent heuristic fallback when LLM API key is not active."""
+        """Intelligent heuristic fallback when LLM API key is not active or restricted."""
         msg = customer_message.lower().strip()
 
         # 1. Universal exit / menu keywords
@@ -202,22 +202,31 @@ Return ONLY valid JSON matching this schema:
         # 2. Greetings / New conversation trigger (use word boundaries to avoid matching 'hai' as 'hi')
         is_greeting = bool(re.search(r'\b(salam|assalam|hello|hi|hey|aalam)\b', msg))
         
-        # 3. Product match check
-        matched_prod = database.match_product_by_text(msg)
-        
-        # If in an active step (e.g. AWAITING_QTY), but customer asks about a different product
-        if matched_prod and current_prod_name and matched_prod["name"] != current_prod_name:
-            return {"intent": "TOPIC_SWITCH", "quantity": extract_quantity(msg), "product_query": matched_prod["name"], "decision": None}
+        # 3. Check quantity in text
+        qty = extract_quantity(msg)
 
-        # If customer sends a pure greeting while in an active state (returning after ghosting)
-        if is_greeting and not extract_quantity(msg) and len(msg.split()) <= 4:
+        # 4. If customer is currently in AWAITING_QTY:
+        if session_state == "AWAITING_QTY":
+            # Check if they explicitly named a different product name (e.g. "seekh kabab", "wings")
+            # Plain numbers like "2" or "5" MUST NOT be treated as product IDs here!
+            matched_prod = database.match_product_by_text(msg, allow_plain_number=False)
+            if matched_prod and current_prod_name and matched_prod["name"] != current_prod_name:
+                return {"intent": "TOPIC_SWITCH", "quantity": qty, "product_query": matched_prod["name"], "decision": None}
+            if qty is not None:
+                return {"intent": "ANSWER_STEP", "quantity": qty, "product_query": None, "decision": None}
+
+        # 5. General product match (for IDLE or other states)
+        matched_prod = database.match_product_by_text(msg, allow_plain_number=(session_state == "IDLE"))
+        
+        if matched_prod and current_prod_name and matched_prod["name"] != current_prod_name:
+            return {"intent": "TOPIC_SWITCH", "quantity": qty, "product_query": matched_prod["name"], "decision": None}
+
+        if is_greeting and not qty and len(msg.split()) <= 4:
             return {"intent": "NEW_START", "quantity": None, "product_query": None, "decision": None}
 
-        # If customer sends a fresh product query from IDLE
         if session_state == "IDLE" and matched_prod:
-            return {"intent": "TOPIC_SWITCH", "quantity": extract_quantity(msg), "product_query": matched_prod["name"], "decision": None}
+            return {"intent": "TOPIC_SWITCH", "quantity": qty, "product_query": matched_prod["name"], "decision": None}
 
-        # Decision keywords
         decision = None
         if any(w in msg for w in ["yes", "haan", "confirm", "theek", "ok"]):
             decision = "yes"
@@ -226,7 +235,7 @@ Return ONLY valid JSON matching this schema:
 
         return {
             "intent": "ANSWER_STEP",
-            "quantity": extract_quantity(msg),
+            "quantity": qty,
             "product_query": matched_prod["name"] if matched_prod else None,
             "decision": decision
         }

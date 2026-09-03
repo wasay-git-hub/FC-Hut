@@ -305,13 +305,18 @@ PRODUCT_KEYWORD_MAP = [
     ("%Seekh%", ["seekh", "seekh kabab", "seekh kababs", "sikh kabab"])
 ]
 
-def match_product_by_text(user_text: str) -> Optional[Dict[str, Any]]:
+def match_product_by_text(user_text: str, allow_plain_number: bool = False) -> Optional[Dict[str, Any]]:
     """Matches text against product IDs, names, or Roman Urdu/spelling aliases."""
     text = user_text.lower().strip()
     
-    # 1. Explicit ID match (e.g. "prod_10", "#10", "item 10", or just "10")
+    # 1. Explicit ID match (e.g. "prod_10", "#10", "item 10")
+    # Only allow bare numbers like "10" if allow_plain_number is explicitly True (e.g. at initial menu selection)
     import re
-    explicit_id = re.match(r'^(?:prod_|^#|^item\s*)?(\d{1,2})$', text)
+    if allow_plain_number:
+        explicit_id = re.match(r'^(?:prod_|^#|^item\s*)?(\d{1,2})$', text)
+    else:
+        explicit_id = re.match(r'^(?:prod_|#|item\s*)(\d{1,2})$', text)
+
     if explicit_id:
         pid = int(explicit_id.group(1))
         prod = get_product_by_id(pid)
